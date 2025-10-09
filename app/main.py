@@ -10,6 +10,7 @@ from app.api import grants as grants_api
 from app.api import tokens as tokens_api
 from app.api import protected as protected_api
 from app.api import break_glass as break_glass_api
+from app.api import audit as audit_api
 from app.middleware.gateway import gateway_auth_middleware
 
 # Configure logging
@@ -110,6 +111,7 @@ app.include_router(requests_api.router, prefix=settings.API_V1_PREFIX)
 app.include_router(grants_api.router, prefix=settings.API_V1_PREFIX)
 app.include_router(tokens_api.router, prefix=settings.API_V1_PREFIX)
 app.include_router(break_glass_api.router, prefix=settings.API_V1_PREFIX)
+app.include_router(audit_api.router, prefix=settings.API_V1_PREFIX)
 app.include_router(protected_api.router)  # Protected routes (no prefix)
 
 
