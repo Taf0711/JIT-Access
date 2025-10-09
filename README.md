@@ -27,6 +27,7 @@ docker compose up -d
 
 This starts all services:
 - **API**: http://localhost:8000 (Swagger docs: http://localhost:8000/docs)
+- **PostgreSQL**: localhost:5433 (mapped from internal 5432 to avoid conflicts)
 - **Grafana**: http://localhost:3000 (admin/admin)
 - **Prometheus**: http://localhost:9090
 - **OPA**: http://localhost:8181
