@@ -1,0 +1,222 @@
+"""
+Tests for token issuance and validation
+"""
+import pytest
+from datetime import datetime, timedelta
+from app import models
+
+
+def test_issue_token_for_approved_request(client, sample_users, sample_resources, db_session):
+    """Test issuing a token for an approved request"""
+    # Create an approved request
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,  # Requester
+        resource_id=sample_resources[0].id,
+        duration_seconds=3600,
+        justification="Test request",
+        status=models.RequestStatus.APPROVED,
+        approved_by=sample_users[1].id,
+        approved_at=datetime.utcnow()
+    )
+    db_session.add(request)
+    db_session.commit()
+    
+    response = client.post(
+        "/api/v1/tokens/issue",
+        json={"request_id": request.id},
+        headers={"X-API-Key": "test_requester_key"}
+    )
+    
+    assert response.status_code == 201
+    data = response.json()
+    assert "access_token" in data
+    assert data["token_type"] == "Bearer"
+    assert "expires_at" in data
+    assert data["resource_name"] == sample_resources[0].name
+
+
+def test_issue_token_for_pending_request_fails(client, sample_users, sample_resources, db_session):
+    """Test that token issuance fails for pending requests"""
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[0].id,
+        duration_seconds=3600,
+        justification="Test request",
+        status=models.RequestStatus.PENDING
+    )
+    db_session.add(request)
+    db_session.commit()
+    
+    response = client.post(
+        "/api/v1/tokens/issue",
+        json={"request_id": request.id},
+        headers={"X-API-Key": "test_requester_key"}
+    )
+    
+    assert response.status_code == 400
+    assert "pending" in response.json()["detail"].lower()
+
+
+def test_issue_token_for_other_users_request_fails(client, sample_users, sample_resources, db_session):
+    """Test that users cannot issue tokens for other users' requests"""
+    request = models.AccessRequest(
+        user_id=sample_users[1].id,  # Different user
+        resource_id=sample_resources[0].id,
+        duration_seconds=3600,
+        justification="Test request",
+        status=models.RequestStatus.APPROVED,
+        approved_by=sample_users[0].id
+    )
+    db_session.add(request)
+    db_session.commit()
+    
+    response = client.post(
+        "/api/v1/tokens/issue",
+        json={"request_id": request.id},
+        headers={"X-API-Key": "test_requester_key"}  # Requester trying to issue for approver's request
+    )
+    
+    assert response.status_code == 403
+
+
+def test_validate_valid_token(client, sample_users, sample_resources, db_session):
+    """Test validating a valid token"""
+    # Create approved request
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[0].id,
+        duration_seconds=3600,
+        justification="Test request",
+        status=models.RequestStatus.APPROVED,
+        approved_by=sample_users[1].id
+    )
+    db_session.add(request)
+    db_session.commit()
+    
+    # Issue token
+    issue_response = client.post(
+        "/api/v1/tokens/issue",
+        json={"request_id": request.id},
+        headers={"X-API-Key": "test_requester_key"}
+    )
+    token = issue_response.json()["access_token"]
+    
+    # Validate token
+    validate_response = client.post(
+        "/api/v1/tokens/validate",
+        json={"token": token, "resource_name": sample_resources[0].name}
+    )
+    
+    assert validate_response.status_code == 200
+    data = validate_response.json()
+    assert data["valid"] is True
+    assert data["user_id"] == sample_users[2].id
+    assert data["resource_name"] == sample_resources[0].name
+
+
+def test_validate_invalid_token(client):
+    """Test validating an invalid token"""
+    response = client.post(
+        "/api/v1/tokens/validate",
+        json={"token": "invalid_token_123"}
+    )
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["valid"] is False
+    assert data["error"] is not None
+
+
+def test_validate_revoked_token(client, sample_users, sample_resources, db_session):
+    """Test that revoked tokens fail validation"""
+    # Create and approve request
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[0].id,
+        duration_seconds=3600,
+        justification="Test request",
+        status=models.RequestStatus.APPROVED,
+        approved_by=sample_users[1].id
+    )
+    db_session.add(request)
+    db_session.commit()
+    
+    # Issue token
+    issue_response = client.post(
+        "/api/v1/tokens/issue",
+        json={"request_id": request.id},
+        headers={"X-API-Key": "test_requester_key"}
+    )
+    token = issue_response.json()["access_token"]
+    
+    # Revoke the grant
+    grant = db_session.query(models.Grant).filter(
+        models.Grant.request_id == request.id
+    ).first()
+    grant.revoked = True
+    grant.revoked_at = datetime.utcnow()
+    db_session.commit()
+    
+    # Try to validate revoked token
+    validate_response = client.post(
+        "/api/v1/tokens/validate",
+        json={"token": token}
+    )
+    
+    assert validate_response.status_code == 200
+    data = validate_response.json()
+    assert data["valid"] is False
+    assert "revoked" in data["error"].lower()
+
+
+def test_protected_endpoint_with_valid_token(client, sample_users, sample_resources, db_session):
+    """Test accessing protected endpoint with valid token"""
+    # Create and approve request
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[0].id,
+        duration_seconds=3600,
+        justification="Test request",
+        status=models.RequestStatus.APPROVED,
+        approved_by=sample_users[1].id
+    )
+    db_session.add(request)
+    db_session.commit()
+    
+    # Issue token
+    issue_response = client.post(
+        "/api/v1/tokens/issue",
+        json={"request_id": request.id},
+        headers={"X-API-Key": "test_requester_key"}
+    )
+    token = issue_response.json()["access_token"]
+    
+    # Access protected endpoint
+    response = client.get(
+        "/protected/api/data",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert "message" in data
+    assert data["user_id"] == sample_users[2].id
+
+
+def test_protected_endpoint_without_token_fails(client):
+    """Test that protected endpoint requires token"""
+    response = client.get("/protected/api/data")
+    
+    assert response.status_code == 401
+    assert "Authorization" in response.json()["detail"]
+
+
+def test_protected_endpoint_with_invalid_token_fails(client):
+    """Test that protected endpoint rejects invalid tokens"""
+    response = client.get(
+        "/protected/api/data",
+        headers={"Authorization": "Bearer invalid_token"}
+    )
+    
+    assert response.status_code == 403
+

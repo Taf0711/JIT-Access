@@ -1,0 +1,112 @@
+groups:
+  - name: jit_access_alerts
+    interval: 30s
+    rules:
+      # High approval latency
+      - alert: HighApprovalLatency
+        expr: histogram_quantile(0.95, rate(jit_approval_duration_seconds_bucket[5m])) > 300
+        for: 5m
+        labels:
+          severity: warning
+          component: approval
+        annotations:
+          summary: "High approval latency detected"
+          description: "95th percentile approval time is {{ $value }}s (threshold: 300s)"
+
+      # Denied request spike
+      - alert: DeniedRequestSpike
+        expr: rate(jit_approvals_total{decision="denied"}[5m]) > 0.33
+        for: 2m
+        labels:
+          severity: warning
+          component: approval
+        annotations:
+          summary: "Spike in denied access requests"
+          description: "Denial rate is {{ $value }} requests/second over 5 minutes"
+
+      # Break-glass usage alert
+      - alert: BreakGlassActivated
+        expr: increase(jit_access_requests_total{is_break_glass="True"}[5m]) > 0
+        labels:
+          severity: warning
+          component: break-glass
+        annotations:
+          summary: "Break-glass access requested"
+          description: "{{ $value }} break-glass requests in the last 5 minutes"
+
+      # High token validation failure rate
+      - alert: HighTokenValidationFailureRate
+        expr: rate(jit_token_validations_total{result!="valid"}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          component: tokens
+        annotations:
+          summary: "High token validation failure rate"
+          description: "Token validation failure rate is {{ $value }} failures/second"
+
+      # Gateway access denied spike
+      - alert: GatewayAccessDeniedSpike
+        expr: rate(jit_gateway_access_total{result="denied"}[5m]) > 0.5
+        for: 2m
+        labels:
+          severity: warning
+          component: gateway
+        annotations:
+          summary: "High rate of gateway access denials"
+          description: "Gateway denial rate is {{ $value }} denials/second"
+
+      # Policy violation alert
+      - alert: PolicyViolationDetected
+        expr: increase(jit_policy_violations_total[5m]) > 3
+        labels:
+          severity: critical
+          component: policy
+        annotations:
+          summary: "Policy violations detected"
+          description: "{{ $value }} policy violations in the last 5 minutes"
+
+      # API latency SLO breach
+      - alert: APILatencySLOBreach
+        expr: histogram_quantile(0.95, rate(jit_http_request_duration_seconds_bucket{endpoint=~"/api/v1/.*"}[5m])) > 0.12
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "API latency SLO breach"
+          description: "API p95 latency is {{ $value }}s (SLO: 120ms)"
+
+      # High API error rate
+      - alert: HighAPIErrorRate
+        expr: rate(jit_http_requests_total{status_code=~"5.."}[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "High API error rate"
+          description: "API error rate is {{ $value }} errors/second"
+
+      # Stale grants not revoked
+      - alert: StaleGrantsDetected
+        expr: jit_active_grants_total > 100
+        for: 10m
+        labels:
+          severity: info
+          component: grants
+        annotations:
+          summary: "High number of active grants"
+          description: "There are {{ $value }} active grants currently"
+
+      # No recent activity (possible system issue)
+      - alert: NoRecentActivity
+        expr: rate(jit_http_requests_total[5m]) == 0
+        for: 15m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "No API activity detected"
+          description: "No HTTP requests in the last 15 minutes - possible system issue"
+

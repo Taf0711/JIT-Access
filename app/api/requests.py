@@ -1,0 +1,234 @@
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request as FastAPIRequest
+from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_
+from typing import List, Optional
+from datetime import datetime, timedelta
+
+from app.db import get_db
+from app import models, schemas
+from app.dependencies import get_current_user, require_role
+from app.services.audit import AuditService
+
+router = APIRouter(prefix="/requests", tags=["Access Requests"])
+
+
+@router.post("", response_model=schemas.AccessRequest, status_code=status.HTTP_201_CREATED)
+def create_access_request(
+    request_data: schemas.AccessRequestCreate,
+    request: FastAPIRequest,
+    db: Session = Depends(get_db),
+    current_user: schemas.CurrentUser = Depends(get_current_user),
+):
+    """Submit a new access request"""
+    
+    # Verify resource exists
+    resource = db.query(models.Resource).filter(models.Resource.id == request_data.resource_id).first()
+    if not resource:
+        raise HTTPException(status_code=404, detail="Resource not found")
+    
+    # Check if there's an active policy for this resource
+    policy = db.query(models.Policy).filter(models.Policy.resource_id == request_data.resource_id).first()
+    if policy and request_data.duration_seconds > policy.max_ttl_seconds:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Requested duration exceeds maximum TTL of {policy.max_ttl_seconds} seconds for this resource"
+        )
+    
+    # Create access request
+    access_request = models.AccessRequest(
+        user_id=current_user.id,
+        resource_id=request_data.resource_id,
+        duration_seconds=request_data.duration_seconds,
+        justification=request_data.justification,
+        is_break_glass=request_data.is_break_glass,
+        status=models.RequestStatus.PENDING,
+    )
+    
+    db.add(access_request)
+    db.commit()
+    db.refresh(access_request)
+    
+    # Audit log
+    ip_address, user_agent = AuditService.extract_request_info(request)
+    AuditService.log_event(
+        db=db,
+        event_type="REQUEST_CREATED",
+        user_id=current_user.id,
+        resource_id=resource.id,
+        request_id=access_request.id,
+        metadata={
+            "duration_seconds": request_data.duration_seconds,
+            "justification": request_data.justification,
+        },
+        is_break_glass=request_data.is_break_glass,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    
+    return access_request
+
+
+@router.get("", response_model=List[schemas.AccessRequestDetail])
+def list_access_requests(
+    status_filter: Optional[models.RequestStatus] = Query(None, alias="status"),
+    user_id: Optional[int] = Query(None),
+    resource_id: Optional[int] = Query(None),
+    is_break_glass: Optional[bool] = Query(None),
+    limit: int = Query(50, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: schemas.CurrentUser = Depends(get_current_user),
+):
+    """List access requests with filtering"""
+    
+    query = db.query(models.AccessRequest)
+    
+    # Non-admin users can only see their own requests or requests they can approve
+    if current_user.role != models.UserRole.ADMIN:
+        if current_user.role == models.UserRole.APPROVER:
+            # Approvers can see requests they can approve and their own requests
+            query = query.filter(
+                or_(
+                    models.AccessRequest.user_id == current_user.id,
+                    models.AccessRequest.status == models.RequestStatus.PENDING
+                )
+            )
+        else:
+            # Requesters can only see their own
+            query = query.filter(models.AccessRequest.user_id == current_user.id)
+    
+    # Apply filters
+    if status_filter:
+        query = query.filter(models.AccessRequest.status == status_filter)
+    if user_id is not None:
+        query = query.filter(models.AccessRequest.user_id == user_id)
+    if resource_id is not None:
+        query = query.filter(models.AccessRequest.resource_id == resource_id)
+    if is_break_glass is not None:
+        query = query.filter(models.AccessRequest.is_break_glass == is_break_glass)
+    
+    # Order by most recent first
+    query = query.order_by(models.AccessRequest.created_at.desc())
+    
+    # Pagination
+    requests = query.offset(offset).limit(limit).all()
+    
+    return requests
+
+
+@router.get("/{request_id}", response_model=schemas.AccessRequestDetail)
+def get_access_request(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: schemas.CurrentUser = Depends(get_current_user),
+):
+    """Get a specific access request"""
+    
+    access_request = db.query(models.AccessRequest).filter(models.AccessRequest.id == request_id).first()
+    if not access_request:
+        raise HTTPException(status_code=404, detail="Access request not found")
+    
+    # Check permissions
+    if current_user.role not in [models.UserRole.ADMIN, models.UserRole.APPROVER]:
+        if access_request.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Not authorized to view this request")
+    
+    return access_request
+
+
+@router.post("/{request_id}/approve", response_model=schemas.AccessRequest)
+def approve_access_request(
+    request_id: int,
+    request: FastAPIRequest,
+    db: Session = Depends(get_db),
+    current_user: schemas.CurrentUser = Depends(require_role(models.UserRole.APPROVER)),
+):
+    """Approve an access request"""
+    
+    access_request = db.query(models.AccessRequest).filter(models.AccessRequest.id == request_id).first()
+    if not access_request:
+        raise HTTPException(status_code=404, detail="Access request not found")
+    
+    # Verify request is pending
+    if access_request.status != models.RequestStatus.PENDING:
+        raise HTTPException(status_code=400, detail=f"Request is already {access_request.status.value}")
+    
+    # Check approver isn't the requester
+    if access_request.user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot approve your own request")
+    
+    # Update request
+    access_request.status = models.RequestStatus.APPROVED
+    access_request.approved_by = current_user.id
+    access_request.approved_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(access_request)
+    
+    # Audit log
+    ip_address, user_agent = AuditService.extract_request_info(request)
+    AuditService.log_event(
+        db=db,
+        event_type="REQUEST_APPROVED",
+        user_id=current_user.id,
+        resource_id=access_request.resource_id,
+        request_id=access_request.id,
+        metadata={
+            "approver_id": current_user.id,
+            "requester_id": access_request.user_id,
+        },
+        is_break_glass=access_request.is_break_glass,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    
+    return access_request
+
+
+@router.post("/{request_id}/deny", response_model=schemas.AccessRequest)
+def deny_access_request(
+    request_id: int,
+    deny_data: schemas.AccessRequestDeny,
+    request: FastAPIRequest,
+    db: Session = Depends(get_db),
+    current_user: schemas.CurrentUser = Depends(require_role(models.UserRole.APPROVER)),
+):
+    """Deny an access request"""
+    
+    access_request = db.query(models.AccessRequest).filter(models.AccessRequest.id == request_id).first()
+    if not access_request:
+        raise HTTPException(status_code=404, detail="Access request not found")
+    
+    # Verify request is pending
+    if access_request.status != models.RequestStatus.PENDING:
+        raise HTTPException(status_code=400, detail=f"Request is already {access_request.status.value}")
+    
+    # Update request
+    access_request.status = models.RequestStatus.DENIED
+    access_request.approved_by = current_user.id
+    access_request.approved_at = datetime.utcnow()
+    access_request.denial_reason = deny_data.denial_reason
+    
+    db.commit()
+    db.refresh(access_request)
+    
+    # Audit log
+    ip_address, user_agent = AuditService.extract_request_info(request)
+    AuditService.log_event(
+        db=db,
+        event_type="REQUEST_DENIED",
+        user_id=current_user.id,
+        resource_id=access_request.resource_id,
+        request_id=access_request.id,
+        metadata={
+            "denier_id": current_user.id,
+            "requester_id": access_request.user_id,
+            "denial_reason": deny_data.denial_reason,
+        },
+        is_break_glass=access_request.is_break_glass,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    
+    return access_request
+
