@@ -8,6 +8,7 @@ from app.db import get_db
 from app import models, schemas
 from app.dependencies import get_current_user, require_role
 from app.services.audit import AuditService
+from app.services.notifications import slack_service
 
 router = APIRouter(prefix="/requests", tags=["Access Requests"])
 
@@ -64,6 +65,23 @@ def create_access_request(
         ip_address=ip_address,
         user_agent=user_agent,
     )
+    
+    # Send Slack notification (async, fire and forget)
+    import asyncio
+    try:
+        asyncio.create_task(
+            slack_service.notify_new_request(
+                request_id=access_request.id,
+                requester_name=current_user.name,
+                resource_name=resource.name,
+                duration_hours=request_data.duration_seconds / 3600,
+                justification=request_data.justification,
+                is_break_glass=request_data.is_break_glass
+            )
+        )
+    except Exception as e:
+        # Don't fail the request if notification fails
+        pass
     
     return access_request
 
@@ -182,6 +200,24 @@ def approve_access_request(
         user_agent=user_agent,
     )
     
+    # Send Slack notification
+    import asyncio
+    try:
+        requester = db.query(models.User).filter(models.User.id == access_request.user_id).first()
+        resource_obj = db.query(models.Resource).filter(models.Resource.id == access_request.resource_id).first()
+        
+        asyncio.create_task(
+            slack_service.notify_request_approved(
+                request_id=access_request.id,
+                requester_name=requester.name if requester else "Unknown",
+                approver_name=current_user.name,
+                resource_name=resource_obj.name if resource_obj else "Unknown",
+                is_break_glass=access_request.is_break_glass
+            )
+        )
+    except Exception:
+        pass
+    
     return access_request
 
 
@@ -229,6 +265,24 @@ def deny_access_request(
         ip_address=ip_address,
         user_agent=user_agent,
     )
+    
+    # Send Slack notification
+    import asyncio
+    try:
+        requester = db.query(models.User).filter(models.User.id == access_request.user_id).first()
+        resource_obj = db.query(models.Resource).filter(models.Resource.id == access_request.resource_id).first()
+        
+        asyncio.create_task(
+            slack_service.notify_request_denied(
+                request_id=access_request.id,
+                requester_name=requester.name if requester else "Unknown",
+                denier_name=current_user.name,
+                resource_name=resource_obj.name if resource_obj else "Unknown",
+                denial_reason=deny_data.denial_reason
+            )
+        )
+    except Exception:
+        pass
     
     return access_request
 
