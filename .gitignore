@@ -1,4 +1,5 @@
-md/
+.context.md
+.context    
 .env
 .env.local
 .env.development.local
@@ -9,5 +10,4 @@ md/
 .vscode
 
 .env.development
-.env.production
-context.md 
+.env.productioncontext.md 
