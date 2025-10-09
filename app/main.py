@@ -11,6 +11,7 @@ from app.api import tokens as tokens_api
 from app.api import protected as protected_api
 from app.api import break_glass as break_glass_api
 from app.api import audit as audit_api
+from app.api import resources as resources_api
 from app.middleware.gateway import gateway_auth_middleware
 
 # Configure logging
@@ -107,6 +108,7 @@ def readiness_check():
 
 
 # Include API routers
+app.include_router(resources_api.router, prefix=settings.API_V1_PREFIX)
 app.include_router(requests_api.router, prefix=settings.API_V1_PREFIX)
 app.include_router(grants_api.router, prefix=settings.API_V1_PREFIX)
 app.include_router(tokens_api.router, prefix=settings.API_V1_PREFIX)
