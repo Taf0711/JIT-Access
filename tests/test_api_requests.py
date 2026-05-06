@@ -239,6 +239,77 @@ def test_break_glass_duplicate_approver_rejected(client, sample_users, sample_re
     assert "already approved" in duplicate_response.json()["detail"].lower()
 
 
+def test_admin_only_policy_rejects_approver(client, sample_users, sample_resources, db_session):
+    """Test that approval policy can restrict approval to admins."""
+    policy = models.Policy(
+        resource_id=sample_resources[1].id,
+        name="Admin Only API Policy",
+        max_ttl_seconds=7200,
+        approval_rules={"min_approvers": 1, "allowed_roles": ["admin"]},
+        time_window_restrictions={}
+    )
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[1].id,
+        duration_seconds=3600,
+        justification="Test admin-only approval",
+        status=models.RequestStatus.PENDING
+    )
+    db_session.add(policy)
+    db_session.add(request)
+    db_session.commit()
+
+    response = client.post(
+        f"/api/v1/requests/{request.id}/approve",
+        headers={"X-API-Key": "test_approver_key"}
+    )
+
+    assert response.status_code == 400
+    assert "not allowed" in response.json()["detail"].lower()
+
+
+def test_standard_request_can_require_two_approvers(client, sample_users, sample_resources, db_session):
+    """Test that min_approvers policy applies to standard requests."""
+    policy = models.Policy(
+        resource_id=sample_resources[1].id,
+        name="Two Approver API Policy",
+        max_ttl_seconds=7200,
+        approval_rules={"min_approvers": 2, "allowed_roles": ["approver", "admin"]},
+        time_window_restrictions={}
+    )
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[1].id,
+        duration_seconds=3600,
+        justification="Test two-approver approval",
+        status=models.RequestStatus.PENDING
+    )
+    db_session.add(policy)
+    db_session.add(request)
+    db_session.commit()
+
+    first_response = client.post(
+        f"/api/v1/requests/{request.id}/approve",
+        headers={"X-API-Key": "test_approver_key"}
+    )
+    assert first_response.status_code == 200
+    assert first_response.json()["status"] == "pending"
+
+    token_response = client.post(
+        "/api/v1/tokens/issue",
+        json={"request_id": request.id},
+        headers={"X-API-Key": "test_requester_key"}
+    )
+    assert token_response.status_code == 400
+
+    second_response = client.post(
+        f"/api/v1/requests/{request.id}/approve",
+        headers={"X-API-Key": "test_admin_key"}
+    )
+    assert second_response.status_code == 200
+    assert second_response.json()["status"] == "approved"
+
+
 def test_approve_own_request_rejected(client, sample_users, sample_resources, db_session):
     """Test that users cannot approve their own requests"""
     # Create a request as requester

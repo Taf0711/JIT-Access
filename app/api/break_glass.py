@@ -107,7 +107,7 @@ def get_request_approvals(
 
 
 @router.post("/requests/{request_id}/second-approval", response_model=schemas.AccessRequest)
-def provide_second_approval(
+async def provide_second_approval(
     request_id: int,
     request: FastAPIRequest,
     db: Session = Depends(get_db),
@@ -142,7 +142,7 @@ def provide_second_approval(
             detail="Break-glass requests require dual approval. Use /api/v1/requests/{id}/approve for the first approval."
         )
 
-    access_request, _approvals_count, _approvals_required, _finalized = approval_service.approve_access_request(
+    access_request, _approvals_count, _approvals_required, _finalized = await approval_service.approve_access_request(
         db=db,
         access_request=access_request,
         current_user=current_user,

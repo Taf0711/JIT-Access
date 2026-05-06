@@ -47,6 +47,29 @@ class PolicyService:
                 violations.append("Access is only allowed during business hours")
 
         return len(violations) == 0, violations
+
+    def _evaluate_approval_locally(
+        self,
+        approver_id: int,
+        approver_role: str,
+        requester_id: int,
+        policy_config: Dict[str, Any],
+        existing_approvals: List[int],
+    ) -> tuple[bool, List[str]]:
+        violations = []
+        approval_rules = policy_config.get("approval_rules", {}) or {}
+        allowed_roles = approval_rules.get("allowed_roles", ["approver", "admin"])
+
+        if approver_id == requester_id:
+            violations.append("Cannot approve your own request")
+
+        if approver_role not in allowed_roles:
+            violations.append(f"Approver role '{approver_role}' is not allowed by policy")
+
+        if approver_id in existing_approvals:
+            violations.append("You have already approved this request")
+
+        return len(violations) == 0, violations
     
     async def evaluate_request_policy(
         self,
@@ -132,6 +155,15 @@ class PolicyService:
         Returns:
             tuple: (allowed: bool, violations: List[str])
         """
+        if self.policy_engine == "local":
+            return self._evaluate_approval_locally(
+                approver_id=approver_id,
+                approver_role=approver_role,
+                requester_id=requester_id,
+                policy_config=policy_config,
+                existing_approvals=existing_approvals,
+            )
+
         input_data = {
             "approver": {
                 "user_id": approver_id,

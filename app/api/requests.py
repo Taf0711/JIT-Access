@@ -171,7 +171,7 @@ def get_access_request(
 
 
 @router.post("/{request_id}/approve", response_model=schemas.AccessRequest)
-def approve_access_request(
+async def approve_access_request(
     request_id: int,
     request: FastAPIRequest,
     db: Session = Depends(get_db),
@@ -183,7 +183,7 @@ def approve_access_request(
     if not access_request:
         raise HTTPException(status_code=404, detail="Access request not found")
     
-    access_request, _approvals_count, _approvals_required, finalized = approval_service.approve_access_request(
+    access_request, _approvals_count, _approvals_required, finalized = await approval_service.approve_access_request(
         db=db,
         access_request=access_request,
         current_user=current_user,

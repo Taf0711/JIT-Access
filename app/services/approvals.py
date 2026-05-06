@@ -5,12 +5,13 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.services.audit import AuditService
+from app.services.policy import policy_service
 
 
 BREAK_GLASS_APPROVALS_REQUIRED = 2
 
 
-def approve_access_request(
+async def approve_access_request(
     db: Session,
     access_request: models.AccessRequest,
     current_user: schemas.CurrentUser,
@@ -27,10 +28,34 @@ def approve_access_request(
         models.AccessRequestApproval.request_id == access_request.id
     ).all()
 
-    if any(approval.approver_id == current_user.id for approval in existing_approvals):
-        raise HTTPException(status_code=400, detail="You have already approved this request")
+    policy = db.query(models.Policy).filter(
+        models.Policy.resource_id == access_request.resource_id
+    ).first()
+    approval_rules = policy.approval_rules if policy else {}
+    policy_config = {
+        "approval_rules": approval_rules or {},
+    }
+    existing_approver_ids = [approval.approver_id for approval in existing_approvals]
+    allowed, violations = await policy_service.evaluate_approval_policy(
+        approver_id=current_user.id,
+        approver_role=current_user.role.value,
+        requester_id=access_request.user_id,
+        resource_id=access_request.resource_id,
+        is_break_glass=access_request.is_break_glass,
+        policy_config=policy_config,
+        existing_approvals=existing_approver_ids,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=400,
+            detail="; ".join(violations) if violations else "Approval denied by policy",
+        )
 
-    approvals_required = BREAK_GLASS_APPROVALS_REQUIRED if access_request.is_break_glass else 1
+    min_policy_approvers = int((approval_rules or {}).get("min_approvers", 1))
+    approvals_required = max(
+        min_policy_approvers,
+        BREAK_GLASS_APPROVALS_REQUIRED if access_request.is_break_glass else 1,
+    )
     approval = models.AccessRequestApproval(
         request_id=access_request.id,
         approver_id=current_user.id,
