@@ -4,6 +4,7 @@ Tests for token issuance and validation
 import pytest
 from datetime import datetime, timedelta
 from app import models
+from app.services.jwt_service import jwt_service
 
 
 def test_issue_token_for_approved_request(client, sample_users, sample_resources, db_session):
@@ -169,6 +170,65 @@ def test_validate_revoked_token(client, sample_users, sample_resources, db_sessi
     assert "revoked" in data["error"].lower()
 
 
+def test_validate_signed_token_without_grant_fails(client, sample_users, sample_resources):
+    """Test that a signed JWT is invalid without a persisted grant."""
+    token = jwt_service.generate_token(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[0].id,
+        resource_name=sample_resources[0].name,
+        scope="db:read",
+        duration_seconds=3600,
+        request_id=12345,
+    )
+
+    response = client.post(
+        "/api/v1/tokens/validate",
+        json={"token": token},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["valid"] is False
+    assert "grant not found" in data["error"].lower()
+
+
+def test_validate_expired_grant_fails(client, sample_users, sample_resources, db_session):
+    """Test that a valid JWT is rejected when its grant is expired."""
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[0].id,
+        duration_seconds=3600,
+        justification="Test request",
+        status=models.RequestStatus.APPROVED,
+        approved_by=sample_users[1].id,
+    )
+    db_session.add(request)
+    db_session.commit()
+
+    issue_response = client.post(
+        "/api/v1/tokens/issue",
+        json={"request_id": request.id},
+        headers={"X-API-Key": "test_requester_key"},
+    )
+    token = issue_response.json()["access_token"]
+
+    grant = db_session.query(models.Grant).filter(
+        models.Grant.request_id == request.id
+    ).first()
+    grant.expires_at = datetime.utcnow() - timedelta(minutes=1)
+    db_session.commit()
+
+    response = client.post(
+        "/api/v1/tokens/validate",
+        json={"token": token},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["valid"] is False
+    assert "expired" in data["error"].lower()
+
+
 def test_protected_endpoint_with_valid_token(client, sample_users, sample_resources, db_session):
     """Test accessing protected endpoint with valid token"""
     # Create and approve request
@@ -219,4 +279,3 @@ def test_protected_endpoint_with_invalid_token_fails(client):
     )
     
     assert response.status_code == 403
-

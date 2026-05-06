@@ -1,7 +1,7 @@
 """
 Demo Gateway Middleware for protecting resources with JWT validation
 """
-from fastapi import Request, HTTPException, status
+from fastapi import Request, status
 from fastapi.responses import JSONResponse
 from typing import Callable
 import logging
@@ -9,8 +9,13 @@ import logging
 from app.services.jwt_service import jwt_service
 from app.db import SessionLocal
 from app.services.audit import AuditService
+from app.services.grants import validate_active_grant_for_token
 
 logger = logging.getLogger(__name__)
+
+
+def _get_session_factory(request: Request):
+    return getattr(request.app.state, "gateway_session_factory", SessionLocal)
 
 
 async def gateway_auth_middleware(request: Request, call_next: Callable):
@@ -43,7 +48,7 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
     
     if not is_valid or not payload:
         # Audit failed access attempt
-        db = SessionLocal()
+        db = _get_session_factory(request)()
         try:
             AuditService.log_event(
                 db=db,
@@ -67,14 +72,15 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
             }
         )
     
-    # Check if token is revoked
-    token_hash = jwt_service.hash_token(token)
-    db = SessionLocal()
+    db = _get_session_factory(request)()
     try:
-        from app.models import Grant
-        grant = db.query(Grant).filter(Grant.token_hash == token_hash).first()
-        
-        if grant and grant.revoked:
+        grant, grant_error = validate_active_grant_for_token(
+            db=db,
+            token=token,
+            payload=payload,
+        )
+
+        if grant_error:
             AuditService.log_event(
                 db=db,
                 event_type="GATEWAY_ACCESS_DENIED",
@@ -82,7 +88,7 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
                 resource_id=payload.get("resource_id"),
                 request_id=payload.get("request_id"),
                 metadata={
-                    "error": "Token revoked",
+                    "error": grant_error,
                     "path": request.url.path,
                     "method": request.method
                 },
@@ -93,7 +99,7 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={
-                    "detail": "Access denied: Token has been revoked",
+                    "detail": f"Access denied: {grant_error}",
                     "path": request.url.path
                 }
             )
@@ -127,4 +133,3 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
     # Continue to protected endpoint
     response = await call_next(request)
     return response
-

@@ -41,9 +41,11 @@ def client(db_session):
             pass
     
     app.dependency_overrides[get_db] = override_get_db
+    app.state.gateway_session_factory = TestingSessionLocal
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+    del app.state.gateway_session_factory
 
 
 @pytest.fixture(scope="function")
@@ -111,4 +113,3 @@ def sample_policy(db_session, sample_resources):
     db_session.add(policy)
     db_session.commit()
     return policy
-

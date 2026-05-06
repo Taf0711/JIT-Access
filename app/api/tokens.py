@@ -12,6 +12,7 @@ from app import models, schemas
 from app.dependencies import get_current_user
 from app.services.jwt_service import jwt_service
 from app.services.audit import AuditService
+from app.services.grants import validate_active_grant_for_token
 
 router = APIRouter(prefix="/tokens", tags=["Tokens"])
 
@@ -188,26 +189,26 @@ async def validate_token(
             error=error
         )
     
-    # Check if token is revoked
-    token_hash = jwt_service.hash_token(validate_request.token)
-    grant = db.query(models.Grant).filter(
-        models.Grant.token_hash == token_hash
-    ).first()
-    
-    if grant and grant.revoked:
+    grant, grant_error = validate_active_grant_for_token(
+        db=db,
+        token=validate_request.token,
+        payload=payload,
+    )
+
+    if grant_error:
         AuditService.log_event(
             db=db,
             event_type="TOKEN_VALIDATION_FAILED",
             user_id=int(payload.get("sub")),
             resource_id=payload.get("resource_id"),
             request_id=payload.get("request_id"),
-            metadata={"error": "Token has been revoked"},
+            metadata={"error": grant_error},
             ip_address=request.client.host if request.client else None,
         )
         
         return TokenValidateResponse(
             valid=False,
-            error="Token has been revoked"
+            error=grant_error
         )
     
     # Check resource name if provided
@@ -253,4 +254,3 @@ async def validate_token(
         scope=payload.get("scope"),
         expires_at=datetime.fromtimestamp(payload.get("exp"))
     )
-
