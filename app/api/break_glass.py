@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from app.db import get_db
 from app import models, schemas
 from app.dependencies import get_current_user, require_role
-from app.services.audit import AuditService
+from app.services import approvals as approval_service
 
 router = APIRouter(prefix="/break-glass", tags=["Break-Glass"])
 
@@ -87,11 +87,9 @@ def get_request_approvals(
     if not access_request.is_break_glass:
         raise HTTPException(status_code=400, detail="Not a break-glass request")
     
-    # Get all approval audit events for this request
-    approvals = db.query(models.AuditEvent).filter(
-        models.AuditEvent.request_id == request_id,
-        models.AuditEvent.event_type == "REQUEST_APPROVED"
-    ).all()
+    approvals = db.query(models.AccessRequestApproval).filter(
+        models.AccessRequestApproval.request_id == request_id
+    ).order_by(models.AccessRequestApproval.created_at.asc()).all()
     
     return {
         "request_id": request_id,
@@ -100,9 +98,8 @@ def get_request_approvals(
         "approvals_count": len(approvals),
         "approvals": [
             {
-                "approver_id": approval.user_id,
-                "approved_at": approval.timestamp,
-                "metadata": approval.event_metadata
+                "approver_id": approval.approver_id,
+                "approved_at": approval.created_at,
             }
             for approval in approvals
         ]
@@ -136,71 +133,22 @@ def provide_second_approval(
             detail="This endpoint is only for break-glass requests"
         )
     
-    # Check if request is pending
-    if access_request.status != models.RequestStatus.PENDING:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Request is already {access_request.status.value}"
-        )
-    
-    # Check if approver is not the requester
-    if access_request.user_id == current_user.id:
-        raise HTTPException(status_code=400, detail="Cannot approve your own request")
-    
-    # Get existing approvals
-    existing_approvals = db.query(models.AuditEvent).filter(
-        models.AuditEvent.request_id == request_id,
-        models.AuditEvent.event_type == "REQUEST_APPROVED"
-    ).all()
-    
-    # Check if this approver already approved
-    if any(approval.user_id == current_user.id for approval in existing_approvals):
-        raise HTTPException(
-            status_code=400,
-            detail="You have already approved this request"
-        )
-    
-    # Check if we need first approval or second
-    if len(existing_approvals) == 0:
-        # This is the first approval
+    existing_approvals = db.query(models.AccessRequestApproval).filter(
+        models.AccessRequestApproval.request_id == request_id
+    ).count()
+    if existing_approvals == 0:
         raise HTTPException(
             status_code=400,
             detail="Break-glass requests require dual approval. Use /api/v1/requests/{id}/approve for the first approval."
         )
-    elif len(existing_approvals) == 1:
-        # This is the second approval - finalize the request
-        from datetime import datetime
-        access_request.status = models.RequestStatus.APPROVED
-        access_request.approved_by = current_user.id
-        access_request.approved_at = datetime.utcnow()
-        
-        db.commit()
-        db.refresh(access_request)
-        
-        # Audit log for second approval
-        ip_address, user_agent = AuditService.extract_request_info(request)
-        AuditService.log_event(
-            db=db,
-            event_type="BREAKGLASS_SECOND_APPROVAL",
-            user_id=current_user.id,
-            resource_id=access_request.resource_id,
-            request_id=access_request.id,
-            metadata={
-                "second_approver_id": current_user.id,
-                "first_approver_id": existing_approvals[0].user_id,
-                "requester_id": access_request.user_id,
-            },
-            is_break_glass=True,
-            ip_address=ip_address,
-            user_agent=user_agent,
-        )
-        
-        return access_request
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="Request already has sufficient approvals"
-        )
+
+    access_request, _approvals_count, _approvals_required, _finalized = approval_service.approve_access_request(
+        db=db,
+        access_request=access_request,
+        current_user=current_user,
+        request=request,
+    )
+    return access_request
 
 
 @router.get("/stats")
@@ -271,4 +219,3 @@ def get_break_glass_stats(
             for req in recent
         ]
     }
-

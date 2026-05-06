@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, JSON, Enum as SQLEnum, Text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, JSON, Enum as SQLEnum, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from datetime import datetime
@@ -95,6 +95,22 @@ class AccessRequest(Base):
     approver = relationship("User", back_populates="approvals", foreign_keys=[approved_by])
     resource = relationship("Resource", back_populates="access_requests")
     grant = relationship("Grant", back_populates="access_request", uselist=False)
+    approval_records = relationship("AccessRequestApproval", back_populates="access_request", cascade="all, delete-orphan")
+
+
+class AccessRequestApproval(Base):
+    __tablename__ = "access_request_approvals"
+    __table_args__ = (
+        UniqueConstraint("request_id", "approver_id", name="uq_access_request_approval"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    request_id = Column(Integer, ForeignKey("access_requests.id"), nullable=False, index=True)
+    approver_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    access_request = relationship("AccessRequest", back_populates="approval_records")
+    approver = relationship("User")
 
 
 class Grant(Base):
@@ -130,4 +146,3 @@ class AuditEvent(Base):
     user = relationship("User")
     resource = relationship("Resource")
     access_request = relationship("AccessRequest")
-

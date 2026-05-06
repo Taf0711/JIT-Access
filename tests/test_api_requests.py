@@ -122,6 +122,106 @@ def test_approve_access_request(client, sample_users, sample_resources, db_sessi
     assert data["approved_by"] == sample_users[1].id  # Approver
 
 
+def test_break_glass_first_approval_stays_pending(client, sample_users, sample_resources, db_session):
+    """Test that break-glass requests are not finalized by one approval."""
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[0].id,
+        duration_seconds=1800,
+        justification="Urgent production incident",
+        status=models.RequestStatus.PENDING,
+        is_break_glass=True,
+    )
+    db_session.add(request)
+    db_session.commit()
+
+    response = client.post(
+        f"/api/v1/requests/{request.id}/approve",
+        headers={"X-API-Key": "test_approver_key"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "pending"
+    assert data["approved_by"] is None
+
+    approvals = db_session.query(models.AccessRequestApproval).filter(
+        models.AccessRequestApproval.request_id == request.id
+    ).all()
+    assert len(approvals) == 1
+    assert approvals[0].approver_id == sample_users[1].id
+
+    token_response = client.post(
+        "/api/v1/tokens/issue",
+        json={"request_id": request.id},
+        headers={"X-API-Key": "test_requester_key"},
+    )
+    assert token_response.status_code == 400
+
+
+def test_break_glass_second_distinct_approval_finalizes(client, sample_users, sample_resources, db_session):
+    """Test that break-glass approval requires two distinct approvers."""
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[0].id,
+        duration_seconds=1800,
+        justification="Urgent production incident",
+        status=models.RequestStatus.PENDING,
+        is_break_glass=True,
+    )
+    db_session.add(request)
+    db_session.commit()
+
+    first_response = client.post(
+        f"/api/v1/requests/{request.id}/approve",
+        headers={"X-API-Key": "test_approver_key"},
+    )
+    assert first_response.status_code == 200
+
+    second_response = client.post(
+        f"/api/v1/requests/{request.id}/approve",
+        headers={"X-API-Key": "test_admin_key"},
+    )
+
+    assert second_response.status_code == 200
+    data = second_response.json()
+    assert data["status"] == "approved"
+    assert data["approved_by"] == sample_users[0].id
+
+    approvals = db_session.query(models.AccessRequestApproval).filter(
+        models.AccessRequestApproval.request_id == request.id
+    ).all()
+    assert len(approvals) == 2
+
+
+def test_break_glass_duplicate_approver_rejected(client, sample_users, sample_resources, db_session):
+    """Test that the same approver cannot count twice for break-glass."""
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[0].id,
+        duration_seconds=1800,
+        justification="Urgent production incident",
+        status=models.RequestStatus.PENDING,
+        is_break_glass=True,
+    )
+    db_session.add(request)
+    db_session.commit()
+
+    first_response = client.post(
+        f"/api/v1/requests/{request.id}/approve",
+        headers={"X-API-Key": "test_approver_key"},
+    )
+    assert first_response.status_code == 200
+
+    duplicate_response = client.post(
+        f"/api/v1/requests/{request.id}/approve",
+        headers={"X-API-Key": "test_approver_key"},
+    )
+
+    assert duplicate_response.status_code == 400
+    assert "already approved" in duplicate_response.json()["detail"].lower()
+
+
 def test_approve_own_request_rejected(client, sample_users, sample_resources, db_session):
     """Test that users cannot approve their own requests"""
     # Create a request as requester
@@ -192,4 +292,3 @@ def test_get_specific_request(client, sample_users, sample_resources, db_session
     assert data["id"] == request.id
     assert "requester" in data
     assert "resource" in data
-

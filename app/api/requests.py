@@ -9,6 +9,7 @@ from app import models, schemas
 from app.dependencies import get_current_user, require_role
 from app.services.audit import AuditService
 from app.services.notifications import slack_service
+from app.services import approvals as approval_service
 
 router = APIRouter(prefix="/requests", tags=["Access Requests"])
 
@@ -167,54 +168,29 @@ def approve_access_request(
     if not access_request:
         raise HTTPException(status_code=404, detail="Access request not found")
     
-    # Verify request is pending
-    if access_request.status != models.RequestStatus.PENDING:
-        raise HTTPException(status_code=400, detail=f"Request is already {access_request.status.value}")
-    
-    # Check approver isn't the requester
-    if access_request.user_id == current_user.id:
-        raise HTTPException(status_code=400, detail="Cannot approve your own request")
-    
-    # Update request
-    access_request.status = models.RequestStatus.APPROVED
-    access_request.approved_by = current_user.id
-    access_request.approved_at = datetime.utcnow()
-    
-    db.commit()
-    db.refresh(access_request)
-    
-    # Audit log
-    ip_address, user_agent = AuditService.extract_request_info(request)
-    AuditService.log_event(
+    access_request, _approvals_count, _approvals_required, finalized = approval_service.approve_access_request(
         db=db,
-        event_type="REQUEST_APPROVED",
-        user_id=current_user.id,
-        resource_id=access_request.resource_id,
-        request_id=access_request.id,
-        metadata={
-            "approver_id": current_user.id,
-            "requester_id": access_request.user_id,
-        },
-        is_break_glass=access_request.is_break_glass,
-        ip_address=ip_address,
-        user_agent=user_agent,
+        access_request=access_request,
+        current_user=current_user,
+        request=request,
     )
     
     # Send Slack notification
     import asyncio
     try:
-        requester = db.query(models.User).filter(models.User.id == access_request.user_id).first()
-        resource_obj = db.query(models.Resource).filter(models.Resource.id == access_request.resource_id).first()
-        
-        asyncio.create_task(
-            slack_service.notify_request_approved(
-                request_id=access_request.id,
-                requester_name=requester.name if requester else "Unknown",
-                approver_name=current_user.name,
-                resource_name=resource_obj.name if resource_obj else "Unknown",
-                is_break_glass=access_request.is_break_glass
+        if finalized:
+            requester = db.query(models.User).filter(models.User.id == access_request.user_id).first()
+            resource_obj = db.query(models.Resource).filter(models.Resource.id == access_request.resource_id).first()
+            
+            asyncio.create_task(
+                slack_service.notify_request_approved(
+                    request_id=access_request.id,
+                    requester_name=requester.name if requester else "Unknown",
+                    approver_name=current_user.name,
+                    resource_name=resource_obj.name if resource_obj else "Unknown",
+                    is_break_glass=access_request.is_break_glass
+                )
             )
-        )
     except Exception:
         pass
     
@@ -285,4 +261,3 @@ def deny_access_request(
         pass
     
     return access_request
-
