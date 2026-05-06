@@ -10,6 +10,7 @@ from app.services.jwt_service import jwt_service
 from app.db import SessionLocal
 from app.services.audit import AuditService
 from app.services.grants import validate_active_grant_for_token
+from app.services.metrics import metrics_service
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,10 @@ def _scope_allows_request(scope: str | None, method: str, path: str) -> bool:
     return False
 
 
+def _record_gateway_access(result: str, request: Request) -> None:
+    metrics_service.record_gateway_access(result, request.url.path)
+
+
 async def gateway_auth_middleware(request: Request, call_next: Callable):
     """
     Middleware to protect /protected/* endpoints with JWT validation
@@ -53,6 +58,7 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
     # Extract token from Authorization header
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
+        _record_gateway_access("denied", request)
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={
@@ -84,6 +90,7 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
         finally:
             db.close()
         
+        _record_gateway_access("denied", request)
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
             content={
@@ -116,6 +123,7 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
                 user_agent=request.headers.get("user-agent"),
             )
             
+            _record_gateway_access("denied", request)
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={
@@ -145,6 +153,7 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
                 user_agent=request.headers.get("user-agent"),
             )
 
+            _record_gateway_access("denied", request)
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={
@@ -173,6 +182,7 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
                 user_agent=request.headers.get("user-agent"),
             )
             
+            _record_gateway_access("denied", request)
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={
@@ -200,6 +210,7 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
                 user_agent=request.headers.get("user-agent"),
             )
             
+            _record_gateway_access("denied", request)
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={
@@ -224,6 +235,7 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
         )
+        _record_gateway_access("granted", request)
         
     finally:
         db.close()
