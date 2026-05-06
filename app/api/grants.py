@@ -7,6 +7,7 @@ from datetime import datetime
 from app.db import get_db
 from app import models, schemas
 from app.dependencies import get_current_user
+from app.services.metrics import metrics_service
 
 router = APIRouter(prefix="/grants", tags=["Grants"])
 
@@ -88,6 +89,16 @@ def revoke_grant(
     
     db.commit()
     db.refresh(grant)
+
+    metrics_service.record_grant_revoked(
+        "admin" if current_user.role == models.UserRole.ADMIN else "owner"
+    )
+    active_grants_count = db.query(models.Grant).filter(
+        and_(
+            models.Grant.expires_at > datetime.utcnow(),
+            models.Grant.revoked == False,
+        )
+    ).count()
+    metrics_service.update_active_grants_count(active_grants_count)
     
     return grant
-

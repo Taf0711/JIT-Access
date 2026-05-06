@@ -13,8 +13,21 @@ from app.dependencies import get_current_user
 from app.services.jwt_service import jwt_service
 from app.services.audit import AuditService
 from app.services.grants import validate_active_grant_for_token
+from app.services.metrics import metrics_service
 
 router = APIRouter(prefix="/tokens", tags=["Tokens"])
+
+
+def _token_validation_result(error: Optional[str]) -> str:
+    if not error:
+        return "valid"
+
+    error_lower = error.lower()
+    if "revoked" in error_lower:
+        return "revoked"
+    if "expired" in error_lower:
+        return "expired"
+    return "invalid"
 
 
 class TokenIssueRequest(BaseModel):
@@ -115,6 +128,7 @@ async def issue_token(
     db.add(grant)
     db.commit()
     db.refresh(grant)
+    metrics_service.record_grant_issued(resource.type.value)
     
     # Audit log
     ip_address, user_agent = AuditService.extract_request_info(request)
@@ -176,6 +190,10 @@ async def validate_token(
     is_valid, payload, error = jwt_service.validate_token(validate_request.token)
     
     if not is_valid or not payload:
+        metrics_service.record_token_validation(
+            _token_validation_result(error),
+            resource_type="unknown",
+        )
         # Audit failed validation
         AuditService.log_event(
             db=db,
@@ -196,6 +214,10 @@ async def validate_token(
     )
 
     if grant_error:
+        metrics_service.record_token_validation(
+            _token_validation_result(grant_error),
+            resource_type="unknown",
+        )
         AuditService.log_event(
             db=db,
             event_type="TOKEN_VALIDATION_FAILED",
@@ -214,6 +236,10 @@ async def validate_token(
     # Check resource name if provided
     if validate_request.resource_name:
         if payload.get("resource_name") != validate_request.resource_name:
+            metrics_service.record_token_validation(
+                "invalid",
+                resource_type="unknown",
+            )
             AuditService.log_event(
                 db=db,
                 event_type="TOKEN_VALIDATION_FAILED",
@@ -232,6 +258,13 @@ async def validate_token(
                 error="Token not valid for this resource"
             )
     
+    resource_type = (
+        grant.access_request.resource.type.value
+        if grant and grant.access_request and grant.access_request.resource
+        else "unknown"
+    )
+    metrics_service.record_token_validation("valid", resource_type=resource_type)
+
     # Audit successful validation
     AuditService.log_event(
         db=db,
