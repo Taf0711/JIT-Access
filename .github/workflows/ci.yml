@@ -39,7 +39,9 @@ jobs:
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
-    needs: test
+    needs:
+      - test
+      - policy-check
 
     steps:
       - name: Check out repository
@@ -47,3 +49,14 @@ jobs:
 
       - name: Build application image
         run: docker build -t jit-access:${{ github.sha }} .
+
+  policy-check:
+    name: Policy Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate OPA policies
+        run: docker run --rm -v "${{ github.workspace }}/policies:/policies" openpolicyagent/opa:latest check /policies

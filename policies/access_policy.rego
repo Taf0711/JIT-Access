@@ -3,158 +3,136 @@ package jit.access
 import future.keywords.if
 import future.keywords.in
 
-# Default deny all access requests
 default allow_request = false
 default allow_approval = false
 
-# Input structure:
-# {
-#   "request": {
-#     "user_id": int,
-#     "user_role": string,
-#     "resource_id": int,
-#     "resource_type": string,
-#     "duration_seconds": int,
-#     "is_break_glass": bool,
-#     "resource_metadata": object
-#   },
-#   "policy": {
-#     "max_ttl_seconds": int,
-#     "approval_rules": object,
-#     "time_window_restrictions": object
-#   }
-# }
+weekday_numbers := {
+    "Monday": 0,
+    "Tuesday": 1,
+    "Wednesday": 2,
+    "Thursday": 3,
+    "Friday": 4,
+    "Saturday": 5,
+    "Sunday": 6,
+}
 
-# Allow request if all conditions are met
 allow_request if {
     input.request
     input.policy
-    
-    # Check TTL doesn't exceed max
-    input.request.duration_seconds <= input.policy.max_ttl_seconds
-    
-    # Check time window restrictions
-    check_time_window
-    
-    # Break-glass requests must be flagged
-    check_break_glass
+    input.request.duration_seconds <= object.get(input.policy, "max_ttl_seconds", 86400)
+    break_glass_ttl_allowed
+    no_access_days_allowed
+    business_hours_allowed
 }
 
-# Check time window restrictions
-check_time_window if {
-    not input.policy.time_window_restrictions
-}
-
-check_time_window if {
-    not input.policy.time_window_restrictions.no_access_days
-}
-
-check_time_window if {
-    # Check if current day is not in no_access_days
-    day_of_week := time.weekday(time.now_ns())
-    restrictions := input.policy.time_window_restrictions
-    not restrictions.no_access_days
-}
-
-check_time_window if {
-    # If business_hours_only is not set, allow
-    restrictions := input.policy.time_window_restrictions
-    not restrictions.business_hours_only
-}
-
-# Break-glass checks
-check_break_glass if {
-    # Non-break-glass requests are OK
+break_glass_ttl_allowed if {
     not input.request.is_break_glass
 }
 
-check_break_glass if {
-    # Break-glass must have shorter TTL (max 30 minutes)
+break_glass_ttl_allowed if {
     input.request.is_break_glass
     input.request.duration_seconds <= 1800
 }
 
-# Approval policy
-# Input structure for approval:
-# {
-#   "approver": {
-#     "user_id": int,
-#     "role": string
-#   },
-#   "request": {
-#     "requester_id": int,
-#     "is_break_glass": bool,
-#     "resource_id": int
-#   },
-#   "policy": {
-#     "approval_rules": {
-#       "min_approvers": int,
-#       "allowed_roles": array
-#     }
-#   },
-#   "existing_approvals": array
-# }
+no_access_days_allowed if {
+    restrictions := object.get(input.policy, "time_window_restrictions", {})
+    count(object.get(restrictions, "no_access_days", [])) == 0
+}
 
-# Allow approval if conditions met
+no_access_days_allowed if {
+    restrictions := object.get(input.policy, "time_window_restrictions", {})
+    no_access_days := object.get(restrictions, "no_access_days", [])
+    weekday_name := time.weekday(time.now_ns())
+    weekday_number := weekday_numbers[weekday_name]
+    not weekday_name in no_access_days
+    not weekday_number in no_access_days
+}
+
+business_hours_allowed if {
+    restrictions := object.get(input.policy, "time_window_restrictions", {})
+    not object.get(restrictions, "business_hours_only", false)
+}
+
+business_hours_allowed if {
+    restrictions := object.get(input.policy, "time_window_restrictions", {})
+    object.get(restrictions, "business_hours_only", false)
+    clock := time.clock(time.now_ns())
+    clock[0] >= 9
+    clock[0] < 17
+}
+
 allow_approval if {
-    # Approver cannot approve their own request
+    input.approver
+    input.request
     input.approver.user_id != input.request.requester_id
-    
-    # Approver must have correct role
-    check_approver_role
-    
-    # Check if more approvals needed for break-glass
-    check_break_glass_approvals
+    approver_role_allowed
+    not input.approver.user_id in object.get(input, "existing_approvals", [])
 }
 
-check_approver_role if {
-    # Admin can always approve
-    input.approver.role == "admin"
+approver_role_allowed if {
+    rules := object.get(input.policy, "approval_rules", {})
+    allowed_roles := object.get(rules, "allowed_roles", ["approver", "admin"])
+    input.approver.role in allowed_roles
 }
 
-check_approver_role if {
-    # Check if approver role is in allowed roles
-    input.approver.role == "approver"
-}
-
-check_approver_role if {
-    # Check against policy allowed roles
-    input.policy.approval_rules.allowed_roles
-    input.approver.role in input.policy.approval_rules.allowed_roles
-}
-
-check_break_glass_approvals if {
-    # Non-break-glass only needs 1 approval
-    not input.request.is_break_glass
-}
-
-check_break_glass_approvals if {
-    # Break-glass needs 2 approvals
-    input.request.is_break_glass
-    count(input.existing_approvals) >= 1  # This would be the 2nd approval
-}
-
-# Violation reasons for debugging
 violation[msg] if {
-    input.request.duration_seconds > input.policy.max_ttl_seconds
-    msg := sprintf("Duration %d exceeds max TTL %d", [input.request.duration_seconds, input.policy.max_ttl_seconds])
+    input.request.duration_seconds > object.get(input.policy, "max_ttl_seconds", 86400)
+    msg := sprintf("Requested duration exceeds maximum TTL of %d seconds for this resource", [object.get(input.policy, "max_ttl_seconds", 86400)])
 }
 
 violation[msg] if {
     input.request.is_break_glass
     input.request.duration_seconds > 1800
-    msg := "Break-glass access cannot exceed 30 minutes (1800 seconds)"
+    msg := "Break-glass access cannot exceed 1800 seconds"
 }
 
 violation[msg] if {
-    input.approver
+    restrictions := object.get(input.policy, "time_window_restrictions", {})
+    no_access_days := object.get(restrictions, "no_access_days", [])
+    weekday_name := time.weekday(time.now_ns())
+    weekday_number := weekday_numbers[weekday_name]
+    weekday_name in no_access_days
+    msg := "Access is not allowed today by policy"
+}
+
+violation[msg] if {
+    restrictions := object.get(input.policy, "time_window_restrictions", {})
+    no_access_days := object.get(restrictions, "no_access_days", [])
+    weekday_name := time.weekday(time.now_ns())
+    weekday_number := weekday_numbers[weekday_name]
+    weekday_number in no_access_days
+    msg := "Access is not allowed today by policy"
+}
+
+violation[msg] if {
+    restrictions := object.get(input.policy, "time_window_restrictions", {})
+    object.get(restrictions, "business_hours_only", false)
+    clock := time.clock(time.now_ns())
+    clock[0] < 9
+    msg := "Access is only allowed during business hours"
+}
+
+violation[msg] if {
+    restrictions := object.get(input.policy, "time_window_restrictions", {})
+    object.get(restrictions, "business_hours_only", false)
+    clock := time.clock(time.now_ns())
+    clock[0] >= 17
+    msg := "Access is only allowed during business hours"
+}
+
+violation[msg] if {
     input.approver.user_id == input.request.requester_id
     msg := "Cannot approve your own request"
 }
 
 violation[msg] if {
-    input.request.is_break_glass
-    count(input.existing_approvals) < 1
-    msg := "Break-glass requests require dual approval (2 approvers)"
+    rules := object.get(input.policy, "approval_rules", {})
+    allowed_roles := object.get(rules, "allowed_roles", ["approver", "admin"])
+    not input.approver.role in allowed_roles
+    msg := sprintf("Approver role '%s' is not allowed by policy", [input.approver.role])
 }
 
+violation[msg] if {
+    input.approver.user_id in object.get(input, "existing_approvals", [])
+    msg := "You have already approved this request"
+}
