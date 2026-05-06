@@ -7,8 +7,8 @@ from typing import Dict, Any
 router = APIRouter(prefix="/protected", tags=["Protected Resources"])
 
 
-@router.get("/api/data")
-def get_protected_data(request: Request) -> Dict[str, Any]:
+@router.get("/resources/{resource_name}/data")
+def get_protected_data(resource_name: str, request: Request) -> Dict[str, Any]:
     """
     Demo protected endpoint
     
@@ -19,6 +19,7 @@ def get_protected_data(request: Request) -> Dict[str, Any]:
         "message": "Access granted to protected resource",
         "user_id": request.state.user_id,
         "resource_id": request.state.resource_id,
+        "resource_name": request.state.resource_name,
         "scope": request.state.scope,
         "request_id": request.state.request_id,
         "data": {
@@ -33,8 +34,8 @@ def get_protected_data(request: Request) -> Dict[str, Any]:
     }
 
 
-@router.get("/api/admin")
-def get_admin_data(request: Request) -> Dict[str, Any]:
+@router.get("/resources/{resource_name}/admin")
+def get_admin_data(resource_name: str, request: Request) -> Dict[str, Any]:
     """
     Demo admin-level protected endpoint
     """
@@ -42,6 +43,7 @@ def get_admin_data(request: Request) -> Dict[str, Any]:
         "message": "Access granted to admin resource",
         "user_id": request.state.user_id,
         "resource_id": request.state.resource_id,
+        "resource_name": request.state.resource_name,
         "scope": request.state.scope,
         "admin_data": {
             "system_status": "operational",
@@ -51,8 +53,8 @@ def get_admin_data(request: Request) -> Dict[str, Any]:
     }
 
 
-@router.post("/api/action")
-def perform_protected_action(request: Request, action_data: Dict[str, Any]) -> Dict[str, Any]:
+@router.post("/resources/{resource_name}/action")
+def perform_protected_action(resource_name: str, request: Request, action_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Demo protected action endpoint
     """
@@ -60,7 +62,7 @@ def perform_protected_action(request: Request, action_data: Dict[str, Any]) -> D
         "message": "Action executed successfully",
         "user_id": request.state.user_id,
         "resource_id": request.state.resource_id,
+        "resource_name": request.state.resource_name,
         "action": action_data,
         "result": "success"
     }
-

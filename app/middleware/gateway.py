@@ -18,6 +18,26 @@ def _get_session_factory(request: Request):
     return getattr(request.app.state, "gateway_session_factory", SessionLocal)
 
 
+def _extract_required_resource_name(path: str) -> str | None:
+    parts = path.strip("/").split("/")
+    if len(parts) >= 3 and parts[0] == "protected" and parts[1] == "resources":
+        return parts[2]
+    return None
+
+
+def _scope_allows_request(scope: str | None, method: str, path: str) -> bool:
+    if scope == "admin":
+        return True
+
+    if method == "GET" and path.endswith("/data"):
+        return scope in {"db:read", "api:access", "service:access", "read"}
+
+    if method == "POST" and path.endswith("/action"):
+        return scope in {"api:access", "service:access", "write"}
+
+    return False
+
+
 async def gateway_auth_middleware(request: Request, call_next: Callable):
     """
     Middleware to protect /protected/* endpoints with JWT validation
@@ -103,6 +123,90 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
                     "path": request.url.path
                 }
             )
+
+        required_resource_name = _extract_required_resource_name(request.url.path)
+        token_resource_name = payload.get("resource_name")
+        if not required_resource_name:
+            denial_reason = "Protected route must include a resource name"
+            AuditService.log_event(
+                db=db,
+                event_type="GATEWAY_ACCESS_DENIED",
+                user_id=int(payload.get("sub")),
+                resource_id=payload.get("resource_id"),
+                request_id=payload.get("request_id"),
+                metadata={
+                    "error": denial_reason,
+                    "path": request.url.path,
+                    "method": request.method,
+                    "scope": payload.get("scope"),
+                    "resource_name": token_resource_name,
+                },
+                ip_address=request.client.host if request.client else None,
+                user_agent=request.headers.get("user-agent"),
+            )
+
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "detail": f"Access denied: {denial_reason}",
+                    "path": request.url.path,
+                },
+            )
+
+        if token_resource_name != required_resource_name:
+            denial_reason = "Token not valid for this resource"
+            AuditService.log_event(
+                db=db,
+                event_type="GATEWAY_ACCESS_DENIED",
+                user_id=int(payload.get("sub")),
+                resource_id=payload.get("resource_id"),
+                request_id=payload.get("request_id"),
+                metadata={
+                    "error": denial_reason,
+                    "expected": required_resource_name,
+                    "actual": token_resource_name,
+                    "path": request.url.path,
+                    "method": request.method,
+                    "scope": payload.get("scope"),
+                },
+                ip_address=request.client.host if request.client else None,
+                user_agent=request.headers.get("user-agent"),
+            )
+            
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "detail": f"Access denied: {denial_reason}",
+                    "path": request.url.path,
+                },
+            )
+
+        if not _scope_allows_request(payload.get("scope"), request.method, request.url.path):
+            denial_reason = "Token scope does not allow this action"
+            AuditService.log_event(
+                db=db,
+                event_type="GATEWAY_ACCESS_DENIED",
+                user_id=int(payload.get("sub")),
+                resource_id=payload.get("resource_id"),
+                request_id=payload.get("request_id"),
+                metadata={
+                    "error": denial_reason,
+                    "path": request.url.path,
+                    "method": request.method,
+                    "scope": payload.get("scope"),
+                    "resource_name": token_resource_name,
+                },
+                ip_address=request.client.host if request.client else None,
+                user_agent=request.headers.get("user-agent"),
+            )
+            
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "detail": f"Access denied: {denial_reason}",
+                    "path": request.url.path,
+                },
+            )
         
         # Successful access - audit log
         AuditService.log_event(
@@ -115,7 +219,7 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
                 "path": request.url.path,
                 "method": request.method,
                 "scope": payload.get("scope"),
-                "resource_name": payload.get("resource_name")
+                "resource_name": token_resource_name
             },
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
@@ -127,6 +231,7 @@ async def gateway_auth_middleware(request: Request, call_next: Callable):
     # Add user context to request state
     request.state.user_id = int(payload.get("sub"))
     request.state.resource_id = payload.get("resource_id")
+    request.state.resource_name = payload.get("resource_name")
     request.state.scope = payload.get("scope")
     request.state.request_id = payload.get("request_id")
     

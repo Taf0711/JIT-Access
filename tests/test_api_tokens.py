@@ -253,7 +253,7 @@ def test_protected_endpoint_with_valid_token(client, sample_users, sample_resour
     
     # Access protected endpoint
     response = client.get(
-        "/protected/api/data",
+        f"/protected/resources/{sample_resources[0].name}/data",
         headers={"Authorization": f"Bearer {token}"}
     )
     
@@ -261,11 +261,102 @@ def test_protected_endpoint_with_valid_token(client, sample_users, sample_resour
     data = response.json()
     assert "message" in data
     assert data["user_id"] == sample_users[2].id
+    assert data["resource_name"] == sample_resources[0].name
+
+
+def test_protected_endpoint_rejects_wrong_resource_token(client, sample_users, sample_resources, db_session):
+    """Test that gateway access is bound to the token resource."""
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[0].id,
+        duration_seconds=3600,
+        justification="Test request",
+        status=models.RequestStatus.APPROVED,
+        approved_by=sample_users[1].id
+    )
+    db_session.add(request)
+    db_session.commit()
+
+    issue_response = client.post(
+        "/api/v1/tokens/issue",
+        json={"request_id": request.id},
+        headers={"X-API-Key": "test_requester_key"}
+    )
+    token = issue_response.json()["access_token"]
+
+    response = client.get(
+        f"/protected/resources/{sample_resources[1].name}/data",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 403
+    assert "resource" in response.json()["detail"].lower()
+
+
+def test_protected_endpoint_rejects_disallowed_scope(client, sample_users, sample_resources, db_session):
+    """Test that read-only database tokens cannot perform protected actions."""
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[0].id,
+        duration_seconds=3600,
+        justification="Test request",
+        status=models.RequestStatus.APPROVED,
+        approved_by=sample_users[1].id
+    )
+    db_session.add(request)
+    db_session.commit()
+
+    issue_response = client.post(
+        "/api/v1/tokens/issue",
+        json={"request_id": request.id},
+        headers={"X-API-Key": "test_requester_key"}
+    )
+    token = issue_response.json()["access_token"]
+
+    response = client.post(
+        f"/protected/resources/{sample_resources[0].name}/action",
+        json={"operation": "restart"},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 403
+    assert "scope" in response.json()["detail"].lower()
+
+
+def test_protected_action_accepts_action_scope(client, sample_users, sample_resources, db_session):
+    """Test that API access tokens can perform protected actions."""
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[1].id,
+        duration_seconds=3600,
+        justification="Test request",
+        status=models.RequestStatus.APPROVED,
+        approved_by=sample_users[1].id
+    )
+    db_session.add(request)
+    db_session.commit()
+
+    issue_response = client.post(
+        "/api/v1/tokens/issue",
+        json={"request_id": request.id},
+        headers={"X-API-Key": "test_requester_key"}
+    )
+    token = issue_response.json()["access_token"]
+
+    response = client.post(
+        f"/protected/resources/{sample_resources[1].name}/action",
+        json={"operation": "refresh"},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["resource_name"] == sample_resources[1].name
 
 
 def test_protected_endpoint_without_token_fails(client):
     """Test that protected endpoint requires token"""
-    response = client.get("/protected/api/data")
+    response = client.get("/protected/resources/test-db/data")
     
     assert response.status_code == 401
     assert "Authorization" in response.json()["detail"]
@@ -274,7 +365,7 @@ def test_protected_endpoint_without_token_fails(client):
 def test_protected_endpoint_with_invalid_token_fails(client):
     """Test that protected endpoint rejects invalid tokens"""
     response = client.get(
-        "/protected/api/data",
+        "/protected/resources/test-db/data",
         headers={"Authorization": "Bearer invalid_token"}
     )
     
