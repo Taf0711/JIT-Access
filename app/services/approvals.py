@@ -12,6 +12,33 @@ from app.services.policy import policy_service
 BREAK_GLASS_APPROVALS_REQUIRED = 2
 
 
+def _audit_approval_denied(
+    db: Session,
+    access_request: models.AccessRequest,
+    current_user: schemas.CurrentUser,
+    request,
+    reason: str,
+    violations: list[str] | None = None,
+) -> None:
+    ip_address, user_agent = AuditService.extract_request_info(request)
+    AuditService.log_event(
+        db=db,
+        event_type="REQUEST_APPROVAL_DENIED",
+        user_id=current_user.id,
+        resource_id=access_request.resource_id,
+        request_id=access_request.id,
+        metadata={
+            "approver_id": current_user.id,
+            "requester_id": access_request.user_id,
+            "reason": reason,
+            "violations": violations or [],
+        },
+        is_break_glass=access_request.is_break_glass,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+
+
 async def approve_access_request(
     db: Session,
     access_request: models.AccessRequest,
@@ -25,13 +52,22 @@ async def approve_access_request(
             access_request.is_break_glass,
             "denied",
         )
-        raise HTTPException(status_code=400, detail=f"Request is already {access_request.status.value}")
+        reason = f"Request is already {access_request.status.value}"
+        _audit_approval_denied(db, access_request, current_user, request, reason)
+        raise HTTPException(status_code=400, detail=reason)
 
     if access_request.user_id == current_user.id:
         metrics_service.record_approval(
             current_user.role.value,
             access_request.is_break_glass,
             "denied",
+        )
+        _audit_approval_denied(
+            db,
+            access_request,
+            current_user,
+            request,
+            "Cannot approve your own request",
         )
         raise HTTPException(status_code=400, detail="Cannot approve your own request")
 
@@ -61,6 +97,14 @@ async def approve_access_request(
             current_user.role.value,
             access_request.is_break_glass,
             "denied",
+        )
+        _audit_approval_denied(
+            db,
+            access_request,
+            current_user,
+            request,
+            "Approval denied by policy",
+            violations,
         )
         raise HTTPException(
             status_code=400,
