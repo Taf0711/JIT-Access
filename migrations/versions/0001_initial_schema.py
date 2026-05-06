@@ -7,6 +7,7 @@ Create Date: 2026-05-06
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision = "0001_initial_schema"
@@ -15,9 +16,9 @@ branch_labels = None
 depends_on = None
 
 
-user_role = sa.Enum("REQUESTER", "APPROVER", "ADMIN", name="userrole")
-request_status = sa.Enum("PENDING", "APPROVED", "DENIED", "EXPIRED", name="requeststatus")
-resource_type = sa.Enum("DATABASE", "API", "SERVER", "SERVICE", name="resourcetype")
+user_role = postgresql.ENUM("REQUESTER", "APPROVER", "ADMIN", name="userrole", create_type=False)
+request_status = postgresql.ENUM("PENDING", "APPROVED", "DENIED", "EXPIRED", name="requeststatus", create_type=False)
+resource_type = postgresql.ENUM("DATABASE", "API", "SERVER", "SERVICE", name="resourcetype", create_type=False)
 
 
 def upgrade() -> None:
