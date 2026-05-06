@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     
     # OPA
     OPA_URL: str = "http://localhost:8181"
+    POLICY_ENGINE: str = "local"
     
     # Slack
     SLACK_WEBHOOK_URL: Optional[str] = None
@@ -31,5 +32,4 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-
 

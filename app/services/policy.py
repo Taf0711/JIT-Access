@@ -3,6 +3,7 @@ OPA Policy Service for evaluating access control policies
 """
 import httpx
 from typing import Dict, Any, List, Optional
+from datetime import datetime
 from app.config import settings
 import logging
 
@@ -12,9 +13,40 @@ logger = logging.getLogger(__name__)
 class PolicyService:
     """Service for interacting with OPA policy engine"""
     
-    def __init__(self, opa_url: str = None):
+    def __init__(self, opa_url: str = None, policy_engine: str = None):
         self.opa_url = opa_url or settings.OPA_URL
+        self.policy_engine = policy_engine or settings.POLICY_ENGINE
         self.client = httpx.Client(timeout=5.0)
+
+    def _evaluate_request_locally(
+        self,
+        duration_seconds: int,
+        is_break_glass: bool,
+        policy_config: Dict[str, Any],
+    ) -> tuple[bool, List[str]]:
+        violations = []
+        max_ttl_seconds = policy_config.get("max_ttl_seconds", 86400)
+        restrictions = policy_config.get("time_window_restrictions", {}) or {}
+
+        if duration_seconds > max_ttl_seconds:
+            violations.append(
+                f"Requested duration exceeds maximum TTL of {max_ttl_seconds} seconds for this resource"
+            )
+
+        if is_break_glass and duration_seconds > 1800:
+            violations.append("Break-glass access cannot exceed 1800 seconds")
+
+        no_access_days = restrictions.get("no_access_days") or []
+        current_weekday = datetime.utcnow().weekday()
+        if current_weekday in no_access_days:
+            violations.append("Access is not allowed today by policy")
+
+        if restrictions.get("business_hours_only"):
+            current_hour = datetime.utcnow().hour
+            if current_hour < 9 or current_hour >= 17:
+                violations.append("Access is only allowed during business hours")
+
+        return len(violations) == 0, violations
     
     async def evaluate_request_policy(
         self,
@@ -33,6 +65,13 @@ class PolicyService:
         Returns:
             tuple: (allowed: bool, violations: List[str])
         """
+        if self.policy_engine == "local":
+            return self._evaluate_request_locally(
+                duration_seconds=duration_seconds,
+                is_break_glass=is_break_glass,
+                policy_config=policy_config,
+            )
+
         input_data = {
             "request": {
                 "user_id": user_id,
@@ -154,4 +193,3 @@ class PolicyService:
 
 # Singleton instance
 policy_service = PolicyService()
-

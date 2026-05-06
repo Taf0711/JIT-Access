@@ -10,12 +10,13 @@ from app.dependencies import get_current_user, require_role
 from app.services.audit import AuditService
 from app.services.notifications import slack_service
 from app.services import approvals as approval_service
+from app.services.policy import policy_service
 
 router = APIRouter(prefix="/requests", tags=["Access Requests"])
 
 
 @router.post("", response_model=schemas.AccessRequest, status_code=status.HTTP_201_CREATED)
-def create_access_request(
+async def create_access_request(
     request_data: schemas.AccessRequestCreate,
     request: FastAPIRequest,
     db: Session = Depends(get_db),
@@ -28,12 +29,26 @@ def create_access_request(
     if not resource:
         raise HTTPException(status_code=404, detail="Resource not found")
     
-    # Check if there's an active policy for this resource
     policy = db.query(models.Policy).filter(models.Policy.resource_id == request_data.resource_id).first()
-    if policy and request_data.duration_seconds > policy.max_ttl_seconds:
+    policy_config = {
+        "max_ttl_seconds": policy.max_ttl_seconds if policy else 86400,
+        "approval_rules": policy.approval_rules if policy else {},
+        "time_window_restrictions": policy.time_window_restrictions if policy else {},
+    }
+    allowed, violations = await policy_service.evaluate_request_policy(
+        user_id=current_user.id,
+        user_role=current_user.role.value,
+        resource_id=resource.id,
+        resource_type=resource.type.value,
+        duration_seconds=request_data.duration_seconds,
+        is_break_glass=request_data.is_break_glass,
+        resource_metadata=resource.resource_metadata or {},
+        policy_config=policy_config,
+    )
+    if not allowed:
         raise HTTPException(
             status_code=400,
-            detail=f"Requested duration exceeds maximum TTL of {policy.max_ttl_seconds} seconds for this resource"
+            detail="; ".join(violations) if violations else "Request denied by policy"
         )
     
     # Create access request

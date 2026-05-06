@@ -43,6 +43,23 @@ def test_create_access_request_exceeds_max_ttl(client, sample_users, sample_reso
     assert "exceeds maximum TTL" in response.json()["detail"]
 
 
+def test_create_break_glass_request_exceeds_emergency_ttl(client, sample_users, sample_resources):
+    """Test that break-glass requests enforce emergency TTL policy."""
+    response = client.post(
+        "/api/v1/requests",
+        json={
+            "resource_id": sample_resources[0].id,
+            "duration_seconds": 3600,
+            "justification": "Emergency investigation for production incident",
+            "is_break_glass": True
+        },
+        headers={"X-API-Key": "test_requester_key"}
+    )
+
+    assert response.status_code == 400
+    assert "break-glass" in response.json()["detail"].lower()
+
+
 def test_create_access_request_invalid_resource(client, sample_users):
     """Test creating request for non-existent resource"""
     response = client.post(
