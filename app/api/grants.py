@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request as FastAPIRequest
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from typing import List
@@ -7,6 +7,7 @@ from datetime import datetime
 from app.db import get_db
 from app import models, schemas
 from app.dependencies import get_current_user
+from app.services.audit import AuditService
 from app.services.metrics import metrics_service
 
 router = APIRouter(prefix="/grants", tags=["Grants"])
@@ -66,6 +67,7 @@ def get_grant(
 @router.post("/{grant_id}/revoke", response_model=schemas.Grant)
 def revoke_grant(
     grant_id: int,
+    request: FastAPIRequest,
     db: Session = Depends(get_db),
     current_user: schemas.CurrentUser = Depends(get_current_user),
 ):
@@ -100,5 +102,23 @@ def revoke_grant(
         )
     ).count()
     metrics_service.update_active_grants_count(active_grants_count)
+
+    access_request = grant.access_request
+    ip_address, user_agent = AuditService.extract_request_info(request)
+    AuditService.log_event(
+        db=db,
+        event_type="GRANT_REVOKED",
+        user_id=current_user.id,
+        resource_id=access_request.resource_id if access_request else None,
+        request_id=access_request.id if access_request else None,
+        metadata={
+            "grant_id": grant.id,
+            "revoked_by": current_user.id,
+            "revocation_type": "admin" if current_user.role == models.UserRole.ADMIN else "owner",
+        },
+        is_break_glass=access_request.is_break_glass if access_request else False,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
     
     return grant
