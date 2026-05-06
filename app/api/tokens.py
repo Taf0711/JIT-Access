@@ -72,10 +72,10 @@ async def issue_token(
         models.Grant.request_id == access_request.id
     ).first()
     
-    if existing_grant and not existing_grant.revoked:
+    if existing_grant:
         raise HTTPException(
             status_code=400,
-            detail="Token already issued for this request"
+            detail="Token already issued for this request; create a new access request for replacement access"
         )
     
     # Get resource info

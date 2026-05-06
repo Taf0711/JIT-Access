@@ -80,6 +80,43 @@ def test_issue_token_for_other_users_request_fails(client, sample_users, sample_
     assert response.status_code == 403
 
 
+def test_issue_token_after_revocation_requires_new_request(client, sample_users, sample_resources, db_session):
+    """Test that a revoked grant does not allow reissuing for the same request."""
+    request = models.AccessRequest(
+        user_id=sample_users[2].id,
+        resource_id=sample_resources[0].id,
+        duration_seconds=3600,
+        justification="Test request",
+        status=models.RequestStatus.APPROVED,
+        approved_by=sample_users[1].id
+    )
+    db_session.add(request)
+    db_session.commit()
+
+    first_response = client.post(
+        "/api/v1/tokens/issue",
+        json={"request_id": request.id},
+        headers={"X-API-Key": "test_requester_key"}
+    )
+    assert first_response.status_code == 201
+
+    grant = db_session.query(models.Grant).filter(
+        models.Grant.request_id == request.id
+    ).first()
+    grant.revoked = True
+    grant.revoked_at = datetime.utcnow()
+    db_session.commit()
+
+    second_response = client.post(
+        "/api/v1/tokens/issue",
+        json={"request_id": request.id},
+        headers={"X-API-Key": "test_requester_key"}
+    )
+
+    assert second_response.status_code == 400
+    assert "new access request" in second_response.json()["detail"].lower()
+
+
 def test_validate_valid_token(client, sample_users, sample_resources, db_session):
     """Test validating a valid token"""
     # Create approved request
