@@ -48,6 +48,21 @@ async def create_access_request(
         policy_config=policy_config,
     )
     if not allowed:
+        ip_address, user_agent = AuditService.extract_request_info(request)
+        AuditService.log_event(
+            db=db,
+            event_type="REQUEST_POLICY_DENIED",
+            user_id=current_user.id,
+            resource_id=resource.id,
+            metadata={
+                "duration_seconds": request_data.duration_seconds,
+                "justification": request_data.justification,
+                "violations": violations,
+            },
+            is_break_glass=request_data.is_break_glass,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
         metrics_service.record_access_request(
             "denied",
             resource.type.value,
