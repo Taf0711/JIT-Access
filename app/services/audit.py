@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 from typing import Optional, Dict, Any
 from app import models, schemas
 from fastapi import Request
+from app.services.metrics import metrics_service
 
 
 class AuditService:
@@ -33,6 +34,7 @@ class AuditService:
         db.add(audit_event)
         db.commit()
         db.refresh(audit_event)
+        metrics_service.record_audit_event(event_type, is_break_glass)
         return audit_event
     
     @staticmethod
@@ -41,4 +43,3 @@ class AuditService:
         ip_address = request.client.host if request.client else None
         user_agent = request.headers.get("user-agent")
         return ip_address, user_agent
-

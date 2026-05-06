@@ -5,6 +5,7 @@ import httpx
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from app.config import settings
+from app.services.metrics import metrics_service
 import logging
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,41 @@ class PolicyService:
         self.opa_url = opa_url or settings.OPA_URL
         self.policy_engine = policy_engine or settings.POLICY_ENGINE
         self.client = httpx.Client(timeout=5.0)
+
+    @staticmethod
+    def _violation_type(violation: str) -> str:
+        violation_lower = violation.lower()
+        if "maximum ttl" in violation_lower:
+            return "max_ttl_exceeded"
+        if "break-glass" in violation_lower:
+            return "break_glass_ttl_exceeded"
+        if "not allowed today" in violation_lower:
+            return "restricted_day"
+        if "business hours" in violation_lower:
+            return "outside_business_hours"
+        if "own request" in violation_lower:
+            return "self_approval"
+        if "approver role" in violation_lower:
+            return "approver_role_denied"
+        if "already approved" in violation_lower:
+            return "duplicate_approval"
+        if "policy evaluation error" in violation_lower:
+            return "policy_evaluation_error"
+        return "policy_denied"
+
+    def _record_policy_metrics(
+        self,
+        policy_type: str,
+        allowed: bool,
+        violations: List[str],
+    ) -> None:
+        metrics_service.record_policy_evaluation(
+            policy_type=policy_type,
+            decision="allow" if allowed else "deny",
+        )
+        if not allowed:
+            for violation in violations or ["Policy denied"]:
+                metrics_service.record_policy_violation(self._violation_type(violation))
 
     def _evaluate_request_locally(
         self,
@@ -89,11 +125,13 @@ class PolicyService:
             tuple: (allowed: bool, violations: List[str])
         """
         if self.policy_engine == "local":
-            return self._evaluate_request_locally(
+            allowed, violations = self._evaluate_request_locally(
                 duration_seconds=duration_seconds,
                 is_break_glass=is_break_glass,
                 policy_config=policy_config,
             )
+            self._record_policy_metrics("request", allowed, violations)
+            return allowed, violations
 
         input_data = {
             "request": {
@@ -132,12 +170,15 @@ class PolicyService:
                     violation_result = violation_response.json()
                     violations = violation_result.get("result", [])
             
+            self._record_policy_metrics("request", allowed, violations)
             return allowed, violations
             
         except httpx.HTTPError as e:
             logger.error(f"OPA policy evaluation failed: {e}")
             # Fail closed - deny by default
-            return False, [f"Policy evaluation error: {str(e)}"]
+            violations = [f"Policy evaluation error: {str(e)}"]
+            self._record_policy_metrics("request", False, violations)
+            return False, violations
     
     async def evaluate_approval_policy(
         self,
@@ -156,13 +197,15 @@ class PolicyService:
             tuple: (allowed: bool, violations: List[str])
         """
         if self.policy_engine == "local":
-            return self._evaluate_approval_locally(
+            allowed, violations = self._evaluate_approval_locally(
                 approver_id=approver_id,
                 approver_role=approver_role,
                 requester_id=requester_id,
                 policy_config=policy_config,
                 existing_approvals=existing_approvals,
             )
+            self._record_policy_metrics("approval", allowed, violations)
+            return allowed, violations
 
         input_data = {
             "approver": {
@@ -203,12 +246,15 @@ class PolicyService:
                     violation_result = violation_response.json()
                     violations = violation_result.get("result", [])
             
+            self._record_policy_metrics("approval", allowed, violations)
             return allowed, violations
             
         except httpx.HTTPError as e:
             logger.error(f"OPA approval policy evaluation failed: {e}")
             # Fail closed - deny by default
-            return False, [f"Policy evaluation error: {str(e)}"]
+            violations = [f"Policy evaluation error: {str(e)}"]
+            self._record_policy_metrics("approval", False, violations)
+            return False, violations
     
     def health_check(self) -> bool:
         """Check if OPA is healthy"""
