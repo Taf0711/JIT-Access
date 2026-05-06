@@ -11,6 +11,7 @@ from app.services.audit import AuditService
 from app.services.notifications import slack_service
 from app.services import approvals as approval_service
 from app.services.policy import policy_service
+from app.services.metrics import metrics_service
 
 router = APIRouter(prefix="/requests", tags=["Access Requests"])
 
@@ -47,6 +48,11 @@ async def create_access_request(
         policy_config=policy_config,
     )
     if not allowed:
+        metrics_service.record_access_request(
+            "denied",
+            resource.type.value,
+            request_data.is_break_glass,
+        )
         raise HTTPException(
             status_code=400,
             detail="; ".join(violations) if violations else "Request denied by policy"
@@ -65,6 +71,11 @@ async def create_access_request(
     db.add(access_request)
     db.commit()
     db.refresh(access_request)
+    metrics_service.record_access_request(
+        access_request.status.value,
+        resource.type.value,
+        access_request.is_break_glass,
+    )
     
     # Audit log
     ip_address, user_agent = AuditService.extract_request_info(request)
@@ -188,6 +199,12 @@ async def approve_access_request(
     if finalized:
         requester = db.query(models.User).filter(models.User.id == access_request.user_id).first()
         resource_obj = db.query(models.Resource).filter(models.Resource.id == access_request.resource_id).first()
+        if resource_obj:
+            metrics_service.record_access_request(
+                access_request.status.value,
+                resource_obj.type.value,
+                access_request.is_break_glass,
+            )
         background_tasks.add_task(
             slack_service.notify_request_approved,
             request_id=access_request.id,
@@ -227,6 +244,18 @@ def deny_access_request(
     
     db.commit()
     db.refresh(access_request)
+
+    resource_obj = db.query(models.Resource).filter(models.Resource.id == access_request.resource_id).first()
+    metrics_service.record_access_request(
+        access_request.status.value,
+        resource_obj.type.value if resource_obj else "unknown",
+        access_request.is_break_glass,
+    )
+    metrics_service.record_approval(
+        current_user.role.value,
+        access_request.is_break_glass,
+        "denied",
+    )
     
     # Audit log
     ip_address, user_agent = AuditService.extract_request_info(request)
@@ -247,7 +276,6 @@ def deny_access_request(
     )
     
     requester = db.query(models.User).filter(models.User.id == access_request.user_id).first()
-    resource_obj = db.query(models.Resource).filter(models.Resource.id == access_request.resource_id).first()
     background_tasks.add_task(
         slack_service.notify_request_denied,
         request_id=access_request.id,

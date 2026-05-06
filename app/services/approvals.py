@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.services.audit import AuditService
+from app.services.metrics import metrics_service
 from app.services.policy import policy_service
 
 
@@ -19,9 +20,19 @@ async def approve_access_request(
 ) -> tuple[models.AccessRequest, int, int, bool]:
     """Record an approval and finalize the request once enough approvals exist."""
     if access_request.status != models.RequestStatus.PENDING:
+        metrics_service.record_approval(
+            current_user.role.value,
+            access_request.is_break_glass,
+            "denied",
+        )
         raise HTTPException(status_code=400, detail=f"Request is already {access_request.status.value}")
 
     if access_request.user_id == current_user.id:
+        metrics_service.record_approval(
+            current_user.role.value,
+            access_request.is_break_glass,
+            "denied",
+        )
         raise HTTPException(status_code=400, detail="Cannot approve your own request")
 
     existing_approvals = db.query(models.AccessRequestApproval).filter(
@@ -46,6 +57,11 @@ async def approve_access_request(
         existing_approvals=existing_approver_ids,
     )
     if not allowed:
+        metrics_service.record_approval(
+            current_user.role.value,
+            access_request.is_break_glass,
+            "denied",
+        )
         raise HTTPException(
             status_code=400,
             detail="; ".join(violations) if violations else "Approval denied by policy",
@@ -68,9 +84,21 @@ async def approve_access_request(
         access_request.status = models.RequestStatus.APPROVED
         access_request.approved_by = current_user.id
         access_request.approved_at = datetime.utcnow()
+        approval_duration_seconds = (
+            access_request.approved_at.timestamp() - access_request.created_at.timestamp()
+            if access_request.created_at else None
+        )
+    else:
+        approval_duration_seconds = None
 
     db.commit()
     db.refresh(access_request)
+    metrics_service.record_approval(
+        current_user.role.value,
+        access_request.is_break_glass,
+        "approved",
+        approval_duration_seconds,
+    )
 
     ip_address, user_agent = AuditService.extract_request_info(request)
     AuditService.log_event(
